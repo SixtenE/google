@@ -4,7 +4,7 @@ import { ScatterplotLayer } from '@deck.gl/layers';
 import { FlyToInterpolator } from '@deck.gl/core';
 
 // Replace with your Google Maps JavaScript API key
-const GOOGLE_MAPS_API_KEY = 'YOUR_GOOGLE_MAPS_API_KEY';
+const GOOGLE_MAPS_API_KEY = 'AIzaSyBk2FOFmCTkhxpO1rdsUXKLqtiZykuwaB8';
 
 const INITIAL_VIEW_STATE = {
   longitude: -73.9857,
