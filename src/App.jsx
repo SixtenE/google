@@ -1,138 +1,136 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { DeckGL } from '@deck.gl/react';
-import { ScatterplotLayer } from '@deck.gl/layers';
-import { FlyToInterpolator } from '@deck.gl/core';
+import { APIProvider, Map, AdvancedMarker, useApiIsLoaded } from '@vis.gl/react-google-maps';
 
-// Replace with your Google Maps JavaScript API key
 const GOOGLE_MAPS_API_KEY = 'AIzaSyBk2FOFmCTkhxpO1rdsUXKLqtiZykuwaB8';
 
-const INITIAL_VIEW_STATE = {
-  longitude: -73.9857,
-  latitude: 40.7484,
-  zoom: 14,
-  pitch: 0,
-  bearing: 0,
-};
+const FALLBACK_CENTER = { lat: 40.7484, lng: -73.9857 };
+const INITIAL_ZOOM = 14;
+const ANIM_DURATION = 500;
 
-function loadGoogleMapsApi(apiKey) {
-  return new Promise((resolve, reject) => {
-    if (window.google?.maps) {
-      resolve(window.google.maps);
-      return;
-    }
-    const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}`;
-    script.async = true;
-    script.onload = () => resolve(window.google.maps);
-    script.onerror = () => reject(new Error('Failed to load Google Maps API'));
-    document.head.appendChild(script);
-  });
+function easeInOut(t) {
+  return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
 }
 
-export default function App() {
-  const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
-  const [clickedLocation, setClickedLocation] = useState(null);
-  const [svStatus, setSvStatus] = useState('Click the map to load Street View');
-  const [googleMapsLoaded, setGoogleMapsLoaded] = useState(false);
+function useAnimatedMarker(target) {
+  const [pos, setPos] = useState(target);
+  const fromRef = useRef(target);
+  const rafRef = useRef(null);
+
+  useEffect(() => {
+    if (!target) { setPos(null); return; }
+    if (!fromRef.current) { fromRef.current = target; setPos(target); return; }
+
+    const from = fromRef.current;
+    const startTime = performance.now();
+
+    cancelAnimationFrame(rafRef.current);
+
+    function step(now) {
+      const t = Math.min((now - startTime) / ANIM_DURATION, 1);
+      const e = easeInOut(t);
+      const next = {
+        lat: from.lat + (target.lat - from.lat) * e,
+        lng: from.lng + (target.lng - from.lng) * e,
+      };
+      setPos(next);
+      if (t < 1) {
+        rafRef.current = requestAnimationFrame(step);
+      } else {
+        fromRef.current = target;
+      }
+    }
+
+    rafRef.current = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [target]);
+
+  return pos;
+}
+
+function getUrlState() {
+  const p = new URLSearchParams(window.location.search);
+  const lat = parseFloat(p.get('lat'));
+  const lng = parseFloat(p.get('lng'));
+  if (!isFinite(lat) || !isFinite(lng)) return null;
+  const heading = parseFloat(p.get('heading'));
+  const pitch = parseFloat(p.get('pitch'));
+  const zoom = parseFloat(p.get('zoom'));
+  return {
+    coords: { lat, lng },
+    pov: {
+      heading: isFinite(heading) ? heading : 0,
+      pitch: isFinite(pitch) ? pitch : 0,
+    },
+    zoom: isFinite(zoom) ? zoom : 1,
+  };
+}
+
+function MapAndStreetView({ center, clickedLocation, initialPov, initialZoom, animatedMarker, onMapClick, onMarkerMove, onPovChange, setSvStatus, svStatus }) {
+  const apiIsLoaded = useApiIsLoaded();
   const streetViewRef = useRef(null);
   const panoramaRef = useRef(null);
 
   useEffect(() => {
-    loadGoogleMapsApi(GOOGLE_MAPS_API_KEY)
-      .then(() => setGoogleMapsLoaded(true))
-      .catch(() => setSvStatus('Failed to load Google Maps API. Check your API key.'));
-  }, []);
-
-  // Initialize or update the Street View panorama when a location is clicked
-  useEffect(() => {
-    if (!googleMapsLoaded || !clickedLocation || !streetViewRef.current) return;
+    if (!apiIsLoaded || !clickedLocation || !streetViewRef.current) return;
 
     const { lat, lng } = clickedLocation;
     const svService = new window.google.maps.StreetViewService();
 
-    svService.getPanorama(
-      { location: { lat, lng }, radius: 100 },
-      (data, status) => {
-        if (status === window.google.maps.StreetViewStatus.OK) {
-          setSvStatus(null);
-
-          if (!panoramaRef.current) {
-            panoramaRef.current = new window.google.maps.StreetViewPanorama(
-              streetViewRef.current,
-              {
-                position: { lat, lng },
-                pov: { heading: 0, pitch: 0 },
-                zoom: 1,
-                addressControl: true,
-                fullscreenControl: true,
-              }
-            );
-          } else {
-            panoramaRef.current.setPosition({ lat, lng });
-          }
+    svService.getPanorama({ location: { lat, lng }, radius: 100 }, (data, status) => {
+      if (status === window.google.maps.StreetViewStatus.OK) {
+        setSvStatus(null);
+        if (!panoramaRef.current) {
+          panoramaRef.current = new window.google.maps.StreetViewPanorama(
+            streetViewRef.current,
+            { position: { lat, lng }, pov: initialPov, zoom: initialZoom }
+          );
+          panoramaRef.current.addListener('position_changed', () => {
+            const pos = panoramaRef.current.getPosition();
+            if (pos) onMarkerMove({ lat: pos.lat(), lng: pos.lng() });
+          });
+          panoramaRef.current.addListener('pov_changed', () => {
+            const pov = panoramaRef.current.getPov();
+            onPovChange({ heading: pov.heading, pitch: pov.pitch });
+          });
+          panoramaRef.current.addListener('zoom_changed', () => {
+            onPovChange({ zoom: panoramaRef.current.getZoom() });
+          });
         } else {
-          setSvStatus(`No Street View imagery available near this location.`);
-          if (panoramaRef.current) {
-            panoramaRef.current.setVisible(false);
-          }
+          panoramaRef.current.setPosition({ lat, lng });
+          panoramaRef.current.setVisible(true);
         }
+      } else {
+        setSvStatus('No Street View imagery available near this location.');
+        if (panoramaRef.current) panoramaRef.current.setVisible(false);
       }
-    );
-  }, [clickedLocation, googleMapsLoaded]);
-
-  const handleClick = useCallback((info) => {
-    if (!info.coordinate) return;
-    const [lng, lat] = info.coordinate;
-    setClickedLocation({ lat, lng });
-    setViewState((vs) => ({
-      ...vs,
-      longitude: lng,
-      latitude: lat,
-      zoom: Math.max(vs.zoom, 14),
-      transitionDuration: 500,
-      transitionInterpolator: new FlyToInterpolator(),
-    }));
-  }, []);
-
-  const layers = [
-    clickedLocation &&
-      new ScatterplotLayer({
-        id: 'click-marker',
-        data: [clickedLocation],
-        getPosition: (d) => [d.lng, d.lat],
-        getRadius: 20,
-        getFillColor: [255, 80, 80, 220],
-        getLineColor: [255, 255, 255],
-        lineWidthMinPixels: 2,
-        stroked: true,
-        radiusMinPixels: 8,
-        radiusMaxPixels: 20,
-      }),
-  ].filter(Boolean);
+    });
+  }, [apiIsLoaded, clickedLocation]);
 
   return (
     <div style={styles.container}>
-      {/* Left panel: deck.gl map */}
-      <div style={styles.mapPanel}>
-        <div style={styles.mapLabel}>deck.gl Map — click to open Street View</div>
-        <DeckGL
-          viewState={viewState}
-          onViewStateChange={({ viewState: vs }) => setViewState(vs)}
-          controller={true}
-          onClick={handleClick}
-          layers={layers}
-          style={styles.deckgl}
-        >
-          {/* Simple canvas map background via deck.gl OrthographicView is not needed;
-              use a plain background. For a real tile basemap, add a TileLayer here. */}
-          <div style={styles.mapBackground} />
-        </DeckGL>
+      {/* Left panel: Google Maps */}
+      <div style={styles.panel}>
+        <div style={styles.label}>Google Maps — click to open Street View</div>
+        {!center ? (
+          <div style={styles.locating}>Locating…</div>
+        ) : (
+          <Map
+            style={styles.fill}
+            defaultCenter={center}
+            defaultZoom={INITIAL_ZOOM}
+            gestureHandling="greedy"
+            mapId="main-map"
+            onClick={onMapClick}
+          >
+            {animatedMarker && <AdvancedMarker position={animatedMarker} />}
+          </Map>
+        )}
       </div>
 
       {/* Right panel: Street View */}
-      <div style={styles.svPanel}>
-        <div style={styles.mapLabel}>Google Street View</div>
-        <div ref={streetViewRef} style={styles.streetView} />
+      <div style={styles.panel}>
+        <div style={styles.label}>Google Street View</div>
+        <div ref={streetViewRef} style={styles.fill} />
         {svStatus && (
           <div style={styles.svOverlay}>
             <span style={styles.svMessage}>{svStatus}</span>
@@ -143,6 +141,96 @@ export default function App() {
   );
 }
 
+function syncUrl(params) {
+  const p = new URLSearchParams(window.location.search);
+  for (const [k, v] of Object.entries(params)) {
+    p.set(k, typeof v === 'number' ? v.toFixed(2) : v);
+  }
+  window.history.replaceState(null, '', `?${p}`);
+}
+
+export default function App() {
+  const [center, setCenter] = useState(null);
+  const urlState = useRef(getUrlState());
+  const initial = urlState.current;
+  const [clickedLocation, setClickedLocation] = useState(initial?.coords ?? null);
+  const [markerLocation, setMarkerLocation] = useState(initial?.coords ?? null);
+  const [svPov, setSvPov] = useState(initial?.pov ?? { heading: 0, pitch: 0 });
+  const [svZoom, setSvZoom] = useState(initial?.zoom ?? 1);
+  const [svStatus, setSvStatus] = useState(
+    initial ? null : 'Click the map to load Street View'
+  );
+  const animatedMarker = useAnimatedMarker(markerLocation);
+
+  const initLocation = useCallback((loc) => {
+    setCenter(loc);
+    setClickedLocation(loc);
+    setMarkerLocation(loc);
+    setSvStatus(null);
+  }, []);
+
+  useEffect(() => {
+    if (initial) {
+      setCenter(initial.coords);
+      return;
+    }
+    if (!navigator.geolocation) {
+      initLocation(FALLBACK_CENTER);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => initLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => initLocation(FALLBACK_CENTER)
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!markerLocation) return;
+    syncUrl({
+      lat: markerLocation.lat,
+      lng: markerLocation.lng,
+      heading: svPov.heading,
+      pitch: svPov.pitch,
+      zoom: svZoom,
+    });
+  }, [markerLocation, svPov, svZoom]);
+
+  const handleMapClick = useCallback((e) => {
+    const { lat, lng } = e.detail.latLng;
+    setClickedLocation({ lat, lng });
+    setMarkerLocation({ lat, lng });
+  }, []);
+
+  const handleMarkerMove = useCallback((loc) => {
+    setMarkerLocation(loc);
+  }, []);
+
+  const handlePovChange = useCallback((update) => {
+    if ('zoom' in update) {
+      setSvZoom(update.zoom);
+    } else {
+      setSvPov(update);
+    }
+  }, []);
+
+  return (
+    <APIProvider apiKey={GOOGLE_MAPS_API_KEY}>
+      <MapAndStreetView
+        center={center}
+        clickedLocation={clickedLocation}
+        initialPov={svPov}
+        initialZoom={svZoom}
+        animatedMarker={animatedMarker}
+        onMapClick={handleMapClick}
+        onMarkerMove={handleMarkerMove}
+        onPovChange={handlePovChange}
+        setSvStatus={setSvStatus}
+        svStatus={svStatus}
+      />
+    </APIProvider>
+  );
+}
+
 const styles = {
   container: {
     display: 'flex',
@@ -150,16 +238,12 @@ const styles = {
     height: '100%',
     fontFamily: 'sans-serif',
   },
-  mapPanel: {
+  panel: {
     position: 'relative',
     flex: 1,
     borderRight: '2px solid #333',
   },
-  svPanel: {
-    position: 'relative',
-    flex: 1,
-  },
-  mapLabel: {
+  label: {
     position: 'absolute',
     top: 10,
     left: '50%',
@@ -173,18 +257,19 @@ const styles = {
     pointerEvents: 'none',
     whiteSpace: 'nowrap',
   },
-  deckgl: {
-    position: 'absolute',
-    inset: 0,
-  },
-  mapBackground: {
-    position: 'absolute',
-    inset: 0,
-    background: '#1a1a2e',
-  },
-  streetView: {
+  fill: {
     width: '100%',
     height: '100%',
+  },
+  locating: {
+    position: 'absolute',
+    inset: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: '#e8e8e8',
+    color: '#555',
+    fontSize: 14,
   },
   svOverlay: {
     position: 'absolute',
