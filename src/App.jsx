@@ -1,5 +1,29 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, Component } from 'react';
 import { APIProvider, Map, AdvancedMarker, useApiIsLoaded } from '@vis.gl/react-google-maps';
+
+class ErrorBoundary extends Component {
+  state = { error: null };
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 32, fontFamily: 'sans-serif', color: '#c00' }}>
+          <h2>Something went wrong</h2>
+          <pre style={{ whiteSpace: 'pre-wrap', marginTop: 12, fontSize: 13, color: '#333' }}>
+            {this.state.error.message}
+            {'\n'}
+            {this.state.error.stack}
+          </pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const GOOGLE_MAPS_API_KEY = 'AIzaSyBk2FOFmCTkhxpO1rdsUXKLqtiZykuwaB8';
 
@@ -141,13 +165,24 @@ function MapAndStreetView({ center, clickedLocation, initialPov, initialZoom, an
   );
 }
 
-function syncUrl(params) {
-  const p = new URLSearchParams(window.location.search);
-  for (const [k, v] of Object.entries(params)) {
-    p.set(k, typeof v === 'number' ? v.toFixed(2) : v);
-  }
-  window.history.replaceState(null, '', `?${p}`);
-}
+const syncUrlThrottled = (() => {
+  let pending = null;
+  let timer = null;
+  return (params) => {
+    pending = params;
+    if (timer) return;
+    timer = setTimeout(() => {
+      timer = null;
+      if (!pending) return;
+      const p = new URLSearchParams(window.location.search);
+      for (const [k, v] of Object.entries(pending)) {
+        p.set(k, typeof v === 'number' ? v.toFixed(2) : v);
+      }
+      window.history.replaceState(null, '', `?${p}`);
+      pending = null;
+    }, 300);
+  };
+})();
 
 export default function App() {
   const [center, setCenter] = useState(null);
@@ -186,7 +221,7 @@ export default function App() {
 
   useEffect(() => {
     if (!markerLocation) return;
-    syncUrl({
+    syncUrlThrottled({
       lat: markerLocation.lat,
       lng: markerLocation.lng,
       heading: svPov.heading,
@@ -214,6 +249,7 @@ export default function App() {
   }, []);
 
   return (
+    <ErrorBoundary>
     <APIProvider apiKey={GOOGLE_MAPS_API_KEY}>
       <MapAndStreetView
         center={center}
@@ -228,6 +264,7 @@ export default function App() {
         svStatus={svStatus}
       />
     </APIProvider>
+    </ErrorBoundary>
   );
 }
 
